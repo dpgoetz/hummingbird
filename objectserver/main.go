@@ -16,8 +16,10 @@
 package objectserver
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -43,6 +45,40 @@ import (
 	"go.uber.org/zap"
 )
 
+type sd struct {
+	name string
+	td   time.Duration
+}
+
+type stats struct {
+	smap   map[string]time.Duration
+	ch     chan sd
+	cancel chan bool
+	cnt    int64
+	logger srv.LowLevelLogger
+}
+
+func (s *stats) recordStat() {
+	for {
+		select {
+		case sData := <-s.ch:
+			if _, ok := s.smap[sData.name]; ok {
+				s.smap[sData.name] += sData.td
+			} else {
+				s.smap[sData.name] = sData.td
+			}
+			s.cnt++
+			if s.cnt%10000 == 0 {
+				data, _ := json.Marshal(s.smap)
+				s.logger.Info("obj stats", zap.String("data", string(data)))
+			}
+
+		case <-s.cancel:
+			return
+		}
+	}
+}
+
 type ObjectServer struct {
 	driveRoot        string
 	hashPathPrefix   string
@@ -60,6 +96,7 @@ type ObjectServer struct {
 	updateTimeout    time.Duration
 	asyncWG          sync.WaitGroup // Used to wait on async goroutines
 	metricsCloser    io.Closer
+	st               stats
 }
 
 func (server *ObjectServer) Type() string {
@@ -227,6 +264,7 @@ func (server *ObjectServer) ObjGetHandler(writer http.ResponseWriter, request *h
 }
 
 func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *http.Request) {
+	ti := time.Now()
 	vars := srv.GetVars(request)
 	outHeaders := writer.Header()
 
@@ -250,7 +288,8 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 			return
 		}
 	}
-
+	server.st.ch <- sd{name: "setHeader", td: time.Since(ti)}
+	ti = time.Now()
 	obj, err := server.newObject(request, vars, false)
 	if err != nil {
 		srv.GetLogger(request).Error("Error getting obj", zap.Error(err))
@@ -258,6 +297,8 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 		return
 	}
 	defer obj.Close()
+	server.st.ch <- sd{name: "callnewObject", td: time.Since(ti)}
+	ti = time.Now()
 
 	if obj.Exists() {
 		if inm := request.Header.Get("If-None-Match"); inm == "*" {
@@ -278,7 +319,10 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 		}
 	}
 
+	server.st.ch <- sd{name: "existChk", td: time.Since(ti)}
+	ti = time.Now()
 	tempFile, err := obj.SetData(request.ContentLength)
+	server.st.ch <- sd{name: "setData", td: time.Since(ti)}
 	if err == DriveFullError {
 		srv.GetLogger(request).Debug("Not enough space available")
 		srv.CustomErrorResponse(writer, 507, vars)
@@ -290,7 +334,14 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 	}
 
 	hash := md5.New()
-	totalSize, err := common.Copy(request.Body, tempFile, hash)
+	ti = time.Now()
+	body := make([]byte, 1024)
+	request.Body.Read(body)
+	server.st.ch <- sd{name: "readData", td: time.Since(ti)}
+	ti = time.Now()
+	totalSize, err := common.Copy(bytes.NewReader(body), tempFile, hash)
+	server.st.ch <- sd{name: "copyData", td: time.Since(ti)}
+	ti = time.Now()
 	if err == io.ErrUnexpectedEOF {
 		srv.StandardResponse(writer, 499)
 		return
@@ -320,13 +371,20 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 	}
 	outHeaders.Set("ETag", metadata["ETag"])
 
+	server.st.ch <- sd{name: "metaCrap", td: time.Since(ti)}
+	ti = time.Now()
 	if err := obj.Commit(metadata); err != nil {
 		srv.GetLogger(request).Error("Error saving object", zap.Error(err))
 		srv.StandardResponse(writer, http.StatusInternalServerError)
 		return
 	}
+	server.st.ch <- sd{name: "metaCommit", td: time.Since(ti)}
+	ti = time.Now()
 	server.containerUpdates(writer, request, metadata, request.Header.Get("X-Delete-At"), vars, srv.GetLogger(request))
+	server.st.ch <- sd{name: "contUpdate", td: time.Since(ti)}
+	ti = time.Now()
 	srv.StandardResponse(writer, http.StatusCreated)
+	server.st.ch <- sd{name: "sendResp", td: time.Since(ti)}
 }
 
 func (server *ObjectServer) ObjPostHandler(writer http.ResponseWriter, request *http.Request) {
@@ -682,6 +740,8 @@ func GetServer(serverconf conf.Config, flags *flag.FlagSet) (bindIP string, bind
 	if server.logger, err = srv.SetupLogger("object-server", &server.logLevel, flags); err != nil {
 		return "", 0, nil, nil, fmt.Errorf("Error setting up logger: %v", err)
 	}
+	server.st = stats{ch: make(chan sd), cancel: make(chan bool), logger: server.logger, smap: map[string]time.Duration{}}
+	go server.st.recordStat()
 
 	server.updateTimeout = time.Duration(serverconf.GetFloat("app:object-server", "container_update_timeout", 0.25) * float64(time.Second))
 	connTimeout := time.Duration(serverconf.GetFloat("app:object-server", "conn_timeout", 1.0) * float64(time.Second))
