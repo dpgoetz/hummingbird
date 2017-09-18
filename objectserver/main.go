@@ -265,6 +265,7 @@ func (server *ObjectServer) ObjGetHandler(writer http.ResponseWriter, request *h
 
 func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *http.Request) {
 	ti := time.Now()
+	tiAll := time.Now()
 	vars := srv.GetVars(request)
 	outHeaders := writer.Header()
 
@@ -298,6 +299,7 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 	}
 	defer obj.Close()
 	server.st.ch <- sd{name: "callnewObject", td: time.Since(ti)}
+	timeToNew := time.Since(ti)
 	ti = time.Now()
 
 	if obj.Exists() {
@@ -338,6 +340,7 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 	body := make([]byte, 1024)
 	request.Body.Read(body)
 	server.st.ch <- sd{name: "readData", td: time.Since(ti)}
+	timeToRead := time.Since(ti)
 	ti = time.Now()
 	totalSize, err := common.Copy(bytes.NewReader(body), tempFile, hash)
 	server.st.ch <- sd{name: "copyData", td: time.Since(ti)}
@@ -385,6 +388,13 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 	ti = time.Now()
 	srv.StandardResponse(writer, http.StatusCreated)
 	server.st.ch <- sd{name: "sendResp", td: time.Since(ti)}
+	server.st.ch <- sd{name: "doneTime", td: time.Since(tiAll)}
+	if time.Since(tiAll) > time.Second {
+		srv.GetLogger(request).Info("slowObj",
+			zap.Duration("time", time.Since(tiAll)),
+			zap.String("percRead", fmt.Sprintf("%.2f", float64(timeToRead)/float64(time.Since(tiAll))*100)),
+			zap.String("percNew", fmt.Sprintf("%.2f", float64(timeToNew)/float64(time.Since(tiAll))*100)))
+	}
 }
 
 func (server *ObjectServer) ObjPostHandler(writer http.ResponseWriter, request *http.Request) {
