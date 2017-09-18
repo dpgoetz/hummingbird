@@ -119,7 +119,7 @@ func (server *ObjectServer) newObject(req *http.Request, vars map[string]string,
 	if !ok {
 		return nil, fmt.Errorf("Engine for policy index %d not found.", policy)
 	}
-	return engine.New(vars, needData, &server.asyncWG)
+	return engine.New(vars, needData, &server.asyncWG, req.Method, server.st)
 }
 
 func resolveEtag(req *http.Request, metadata map[string]string) string {

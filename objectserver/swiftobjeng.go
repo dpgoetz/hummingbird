@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/troubling/hummingbird/common"
 	"github.com/troubling/hummingbird/common/conf"
@@ -186,46 +187,81 @@ type SwiftEngine struct {
 }
 
 // New returns an instance of SwiftObject with the given parameters. Metadata is read in and if needData is true, the file is opened.  AsyncWG is a waitgroup if the object spawns any async operations
-func (f *SwiftEngine) New(vars map[string]string, needData bool, asyncWG *sync.WaitGroup) (Object, error) {
+func (f *SwiftEngine) New(vars map[string]string, needData bool, asyncWG *sync.WaitGroup, method string, st stats) (Object, error) {
+	start := time.Now()
 	var err error
 	sor := &SwiftObject{reclaimAge: f.reclaimAge, reserve: f.reserve, asyncWG: asyncWG}
+	st.ch <- sd{name: fmt.Sprintf("%s-SwiftObject", method), td: time.Since(start)}
+	ti := time.Now()
 	sor.hashDir = ObjHashDir(vars, f.driveRoot, f.hashPathPrefix, f.hashPathSuffix, f.policy)
+	st.ch <- sd{name: fmt.Sprintf("%s-hashDir", method), td: time.Since(ti)}
+	ti = time.Now()
 	sor.tempDir = TempDirPath(f.driveRoot, vars["device"])
-	sor.dataFile, sor.metaFile = ObjectFiles(sor.hashDir)
-	if sor.Exists() {
-		var stat os.FileInfo
-		if needData {
-			if sor.file, err = os.Open(sor.dataFile); err != nil {
-				return nil, err
-			}
-			if sor.metadata, err = OpenObjectMetadata(sor.file.Fd(), sor.metaFile); err != nil {
-				sor.Quarantine()
-				return nil, fmt.Errorf("Error getting metadata: %v", err)
-			}
-		} else {
-			if sor.metadata, err = ObjectMetadata(sor.dataFile, sor.metaFile); err != nil {
-				sor.Quarantine()
-				return nil, fmt.Errorf("Error getting metadata: %v", err)
-			}
+	st.ch <- sd{name: fmt.Sprintf("%s-tempDir", method), td: time.Since(ti)}
+	ti = time.Now()
+	tryListing := true
+	if !needData {
+		if _, err = os.Stat(sor.hashDir); os.IsNotExist(err) {
+			st.ch <- sd{name: fmt.Sprintf("%s-dirStatNotExist", method), td: time.Since(ti)}
+			sor.dataFile, sor.metaFile = "", ""
+			tryListing = false
 		}
-		if sor.file != nil {
-			if stat, err = sor.file.Stat(); err != nil {
-				sor.Close()
+		ti = time.Now()
+	}
+
+	if tryListing {
+		st.ch <- sd{name: fmt.Sprintf("%s-dirStatYesExist", method), td: time.Since(ti)}
+		sor.dataFile, sor.metaFile = ObjectFiles(sor.hashDir)
+		st.ch <- sd{name: fmt.Sprintf("%s-ObjectFiles", method), td: time.Since(ti)}
+		ti = time.Now()
+		if sor.Exists() {
+			st.ch <- sd{name: fmt.Sprintf("%s-ExistsYes", method), td: time.Since(ti)}
+			ti = time.Now()
+			var stat os.FileInfo
+			if needData {
+				if sor.file, err = os.Open(sor.dataFile); err != nil {
+					return nil, err
+				}
+				st.ch <- sd{name: fmt.Sprintf("%s-openFile", method), td: time.Since(ti)}
+				ti = time.Now()
+				if sor.metadata, err = OpenObjectMetadata(sor.file.Fd(), sor.metaFile); err != nil {
+					sor.Quarantine()
+					return nil, fmt.Errorf("Error getting metadata: %v", err)
+				}
+				st.ch <- sd{name: fmt.Sprintf("%s-OpenObjectMetadata", method), td: time.Since(ti)}
+				ti = time.Now()
+			} else {
+				if sor.metadata, err = ObjectMetadata(sor.dataFile, sor.metaFile); err != nil {
+					sor.Quarantine()
+					return nil, fmt.Errorf("Error getting metadata: %v", err)
+				}
+				st.ch <- sd{name: fmt.Sprintf("%s-objectmetadata", method), td: time.Since(ti)}
+				ti = time.Now()
+			}
+			if sor.file != nil {
+				if stat, err = sor.file.Stat(); err != nil {
+					sor.Close()
+					return nil, fmt.Errorf("Error statting file: %v", err)
+				}
+			} else if stat, err = os.Stat(sor.dataFile); err != nil {
 				return nil, fmt.Errorf("Error statting file: %v", err)
 			}
-		} else if stat, err = os.Stat(sor.dataFile); err != nil {
-			return nil, fmt.Errorf("Error statting file: %v", err)
+			st.ch <- sd{name: fmt.Sprintf("%s-statFile", method), td: time.Since(ti)}
+			ti = time.Now()
+			if contentLength, err := strconv.ParseInt(sor.metadata["Content-Length"], 10, 64); err != nil {
+				sor.Quarantine()
+				return nil, fmt.Errorf("Unable to parse content-length: %s", sor.metadata["Content-Length"])
+			} else if stat.Size() != contentLength {
+				sor.Quarantine()
+				return nil, fmt.Errorf("File size doesn't match content-length: %d vs %d", stat.Size(), contentLength)
+			}
+		} else {
+			st.ch <- sd{name: fmt.Sprintf("%s-ExistsNo", method), td: time.Since(ti)}
+			sor.metadata, _ = ObjectMetadata(sor.dataFile, sor.metaFile) // ignore errors if deleted
+			st.ch <- sd{name: fmt.Sprintf("%s-ExistsNoMetadata", method), td: time.Since(ti)}
 		}
-		if contentLength, err := strconv.ParseInt(sor.metadata["Content-Length"], 10, 64); err != nil {
-			sor.Quarantine()
-			return nil, fmt.Errorf("Unable to parse content-length: %s", sor.metadata["Content-Length"])
-		} else if stat.Size() != contentLength {
-			sor.Quarantine()
-			return nil, fmt.Errorf("File size doesn't match content-length: %d vs %d", stat.Size(), contentLength)
-		}
-	} else {
-		sor.metadata, _ = ObjectMetadata(sor.dataFile, sor.metaFile) // ignore errors if deleted
 	}
+	st.ch <- sd{name: fmt.Sprintf("%s-ObjEngNew", method), td: time.Since(start)}
 	return sor, nil
 }
 
