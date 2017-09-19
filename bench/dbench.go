@@ -122,6 +122,7 @@ func RunDBench(args []string) {
 		fmt.Println("    num_gets = 30000")
 		fmt.Println("    do_replicates = false")
 		fmt.Println("    delete = yes")
+		fmt.Println("    num_partitions = 100")
 		fmt.Println("    minimum_partition_number = 1000000000")
 		fmt.Println("    check_mounted = false")
 		fmt.Println("    #drive_list = sdb1,sdb2")
@@ -145,7 +146,7 @@ func RunDBench(args []string) {
 	doReplicates := benchconf.GetBool("dbench", "do_replicates", false)
 	checkMounted := benchconf.GetBool("dbench", "check_mounted", false)
 	driveList := benchconf.GetDefault("dbench", "drive_list", "")
-	numPartitions := int64(100)
+	numPartitions := benchconf.GetInt("dbench", "num_partitions", 100)
 	minPartition := benchconf.GetInt("dbench", "minimum_partition_number", 1000000000)
 	delete := benchconf.GetBool("dbench", "delete", true)
 
