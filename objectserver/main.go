@@ -62,6 +62,11 @@ func (s *stats) recordStat() {
 	for {
 		select {
 		case sData := <-s.ch:
+			if sData.name == "RESET" {
+				s.smap = map[string]time.Duration{}
+				s.logger.Info("resetting stats")
+				continue
+			}
 			if _, ok := s.smap[sData.name]; ok {
 				s.smap[sData.name] += sData.td
 			} else {
@@ -399,6 +404,10 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 
 func (server *ObjectServer) ObjPostHandler(writer http.ResponseWriter, request *http.Request) {
 	vars := srv.GetVars(request)
+	if vars["device"] == "reset-stat" {
+		// reset like: curl http://127.0.0.1:6000/reset-stat/1/a/c/o -XPOST
+		server.st.ch <- sd{name: "RESET", td: time.Second}
+	}
 
 	requestTimestamp, err := common.StandardizeTimestamp(request.Header.Get("X-Timestamp"))
 	if err != nil {
