@@ -73,6 +73,7 @@ type ObjectEngine interface {
 type NurseryObjectEngine interface {
 	ObjectEngine
 	GetNurseryObjects(device string, c chan ObjectStabilizer, cancel chan struct{})
+	GetAllStableFiles(device string, partition string, fChan chan string, cancel chan struct{})
 }
 
 type PolicyHandlerRegistrator interface {

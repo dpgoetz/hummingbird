@@ -520,6 +520,8 @@ func (f *nurseryEngine) New(vars map[string]string, needData bool, asyncWG *sync
 	}
 	return sor, nil
 }
+func (f *nurseryEngine) GetAllStableFiles(device string, partition string, fChan chan string, cancel chan struct{}) {
+}
 
 func (f *nurseryEngine) GetNurseryObjects(device string, c chan ObjectStabilizer, cancel chan struct{}) {
 	defer close(c)

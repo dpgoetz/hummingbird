@@ -75,6 +75,10 @@ func (nrd *nurseryDevice) updateStat(stat string, amount int64) {
 	nrd.r.updateStat <- statUpdate{"object-nursery", key, stat, amount}
 }
 
+func (nrd *nurseryDevice) listAllFilesToReplicate(partition string, fChan chan string, cancel chan struct{}) {
+	nrd.objEngine.GetAllStableFiles(nrd.dev.Device, partition, fChan, cancel)
+}
+
 func (nrd *nurseryDevice) stabilizeDevice() {
 	nrd.updateStat("startRun", 1)
 	if mounted, err := fs.IsMount(filepath.Join(nrd.r.deviceRoot, nrd.dev.Device)); nrd.r.checkMounts && (err != nil || mounted != true) {

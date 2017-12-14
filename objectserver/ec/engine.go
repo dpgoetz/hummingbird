@@ -225,6 +225,9 @@ func (f *ecEngine) RegisterHandlers(addRoute func(method, path string, handler h
 	addRoute("DELETE", "/ec-frag/:device/:hash/:index", f.ecFragDeleteHandler)
 }
 
+func (f *ecEngine) GetAllStableFiles(device string, partition string, fChan chan string, cancel chan struct{}) {
+}
+
 func (f *ecEngine) GetNurseryObjects(device string, c chan objectserver.ObjectStabilizer, cancel chan struct{}) {
 	defer close(c)
 	idb, err := f.getDB(device)

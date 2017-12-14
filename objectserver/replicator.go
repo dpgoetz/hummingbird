@@ -43,14 +43,15 @@ import (
 )
 
 const (
-	tmpEmptyTime                 = 24 * time.Hour
-	replicateStatsReportInterval = 10 * time.Minute
-	replicateDeviceTimeout       = 4 * time.Hour
-	replicateIncomingTimeout     = time.Minute
-	replicateLoopSleepTime       = time.Second * 30
-	replicatePartSleepTime       = time.Millisecond * 10
-	handoffListDirFreq           = time.Minute * 10
-	handoffToAllMod              = 5
+	tmpEmptyTime                   = 24 * time.Hour
+	replicateStatsReportInterval   = 10 * time.Minute
+	replicateDeviceTimeout         = 4 * time.Hour
+	replicateIncomingTimeout       = time.Minute
+	replicateLoopSleepTime         = time.Second * 30
+	replicatePartSleepTime         = time.Millisecond * 10
+	priorityReplicatePartSleepTime = time.Millisecond * 100
+	handoffListDirFreq             = time.Minute * 10
+	handoffToAllMod                = 5
 )
 
 type PriorityRepJob struct {
@@ -150,15 +151,17 @@ type DeviceStats struct {
 type ReplicationDevice interface {
 	Replicate()
 	ReplicateLoop()
+	PriorityReplicateLoop()
 	Key() string
 	Cancel()
 	PriorityReplicate(pri PriorityRepJob, timeout time.Duration) bool
 }
 
 type replJob struct {
-	partition string
-	nodes     []*ring.Device
-	headers   map[string]string
+	partition            string
+	nodes                []*ring.Device
+	headers              map[string]string
+	listFilesToReplicate func(partition string, fChan chan string, cancel chan struct{})
 }
 
 type replicationDevice struct {
@@ -173,11 +176,12 @@ type replicationDevice struct {
 		listPartitions() ([]string, []string, error)
 		replicatePartition(partition string)
 	}
-	r      *Replicator
-	dev    *ring.Device
-	policy int
-	cancel chan struct{}
-	priRep chan PriorityRepJob
+	r         *Replicator
+	dev       *ring.Device
+	policy    int
+	cancel    chan struct{}
+	pricancel chan struct{}
+	priRep    chan PriorityRepJob
 }
 
 type statUpdate struct {
@@ -196,6 +200,11 @@ type beginReplicationResponse struct {
 	conn   RepConn
 	hashes map[string]string
 	err    error
+}
+
+func (rd *replicationDevice) listAllFilesToReplicate(partition string, fChan chan string, cancel chan struct{}) {
+	path := filepath.Join(rd.r.deviceRoot, rd.dev.Device, PolicyDir(rd.policy), partition)
+	rd.listObjFiles(fChan, cancel, path, func(string) bool { return true })
 }
 
 func (rd *replicationDevice) listObjFiles(objChan chan string, cancel chan struct{}, partdir string, needSuffix func(string) bool) {
@@ -467,7 +476,6 @@ func (rd *replicationDevice) replicateUsingHashes(rjob replJob, moreNodes ring.M
 }
 
 func (rd *replicationDevice) replicateAll(rjob replJob, isHandoff bool) {
-	path := filepath.Join(rd.r.deviceRoot, rd.dev.Device, PolicyDir(rd.policy), rjob.partition)
 	syncCount := 0
 	remoteConnections := make(map[int]RepConn)
 	rChan := make(chan beginReplicationResponse)
@@ -488,7 +496,8 @@ func (rd *replicationDevice) replicateAll(rjob replJob, isHandoff bool) {
 	objChan := make(chan string, 100)
 	cancel := make(chan struct{})
 	defer close(cancel)
-	go rd.i.listObjFiles(objChan, cancel, path, func(string) bool { return true })
+	//go rd.i.listObjFiles(objChan, cancel, path, func(string) bool { return true })
+	go rjob.listFilesToReplicate(rjob.partition, objChan, cancel)
 	for objFile := range objChan {
 		toSync := make([]*syncFileArg, 0)
 		for _, dev := range rjob.nodes {
@@ -521,6 +530,7 @@ func (rd *replicationDevice) replicateAll(rjob replJob, isHandoff bool) {
 		}
 	}
 	if syncCount > 0 {
+		path := filepath.Join(rd.r.deviceRoot, rd.dev.Device, PolicyDir(rd.policy), rjob.partition)
 		rd.r.logger.Info("[replicateAll]", zap.String("Partition", path), zap.Any("Files Synced", syncCount))
 	}
 }
@@ -554,14 +564,50 @@ func (rd *replicationDevice) replicatePartition(partition string) {
 	if policy == nil {
 		return
 	}
-	rjob := replJob{partition: partition, nodes: nodes}
-	if handoff || (policy.Type == "replication-nursery" &&
-		!common.LooksTrue(policy.Config["cache_hash_dirs"])) {
-		rd.i.replicateAll(rjob, handoff)
-	} else {
-		rd.i.replicateUsingHashes(rjob, rd.r.objectRings[rd.policy].GetMoreNodes(partitioni))
+	if policy.Type == "replication" || policy.Type == "replication-nursery" {
+		// run normal replication on replication policies
+		// for replication-nursery policies this will run normal replication
+		// on the nursery.
+		rjob := replJob{partition: partition, nodes: nodes,
+			listFilesToReplicate: rd.listAllFilesToReplicate}
+		if handoff || (policy.Type == "replication-nursery" &&
+			!common.LooksTrue(policy.Config["cache_hash_dirs"])) {
+			rd.i.replicateAll(rjob, handoff)
+		} else {
+			rd.i.replicateUsingHashes(rjob, rd.r.objectRings[rd.policy].GetMoreNodes(partitioni))
+		}
+		rd.updateStat("PartitionsDone", 1)
 	}
-	rd.updateStat("PartitionsDone", 1)
+	/*
+		TODO: this would work as a fail safe to problems in priority
+		replication handled by andrewd. i feel like there should be something
+		there that maybe runs once a day or something? we could add a new json
+		file somewhere that would keep track of the last run? i could just keep
+		track in memory.. I just dont want this to start running if andrewd is
+		in middle of a moveparts run trying to corrdinate stuff. if i did turn
+		this on for handoffs it might stampede new servers. but- if there was a
+		ring change, and the dispersion object got moved and then replication
+		broke before the entire partition was moved (maybe a restart to
+		services) then andrewd would not know to move this thing.  on the other
+		hand the whole point of "stable" is to not have to run replication on.
+
+		maybe have andrewd send a priority repl call to clean up handoff partitions
+		every once in a while. he could coordinate the calls.. hmmmm.
+
+		if policy.Type == "replication-nursery" || policy.Type == "hec" {
+			// for stable replication
+			if !handoff {
+				return
+			}
+			if nrd, ok := rd.r.nurseryDevices(rd.Key()); ok {
+				rjob := replJob{
+					partition: partition, nodes: nodes,
+					listFilesToReplicate: nrd.listAllFilesToReplicate}
+				rd.i.replicateAll(rjob, handoff)
+				rd.updateStat("PartitionsDone", 1)
+			}
+		}
+	*/
 }
 
 func (rd *replicationDevice) listPartitions() ([]string, []string, error) {
@@ -597,7 +643,13 @@ func (rd *replicationDevice) listPartitions() ([]string, []string, error) {
 }
 
 func (rd *replicationDevice) Replicate() {
-	if rd.r.policies[rd.policy].Type == "hec" { // TODO yuck
+	if rd.r.policies[rd.policy].Type == "hec" { // TODO yuck.
+		// we could get rid of this- see comment in replicatePartition
+		// otherwise would have to separate out runningDevices into yet another
+		// map that would just do priority replication. then make
+		// newReplicationDevice return err for "hec" (maybe involve some
+		// casting thing like nurseryDevice) and populate new map with
+		// newPriorityReplicationDevice. which yuck is more yuck.
 		return
 	}
 	defer srv.LogPanics(rd.r.logger, fmt.Sprintf("PANIC REPLICATING DEVICE: %s", rd.dev.Device))
@@ -637,7 +689,6 @@ func (rd *replicationDevice) Replicate() {
 			}
 		default:
 		}
-		rd.processPriorityJobs()
 		rd.i.replicatePartition(partition)
 		if j := common.StringInSliceIndex(partition, handoffPartitions); j >= 0 {
 			handoffPartitions = append(handoffPartitions[:j], handoffPartitions[j+1:]...)
@@ -672,6 +723,7 @@ func (rd *replicationDevice) Replicate() {
 func (rd *replicationDevice) Cancel() {
 	rd.updateStat("cancel", 1)
 	close(rd.cancel)
+	close(rd.pricancel)
 }
 
 func (rd *replicationDevice) ReplicateLoop() {
@@ -683,6 +735,18 @@ func (rd *replicationDevice) ReplicateLoop() {
 			rd.Replicate()
 		}
 		time.Sleep(replicateLoopSleepTime)
+	}
+}
+
+func (rd *replicationDevice) PriorityReplicateLoop() {
+	for {
+		select {
+		case <-rd.pricancel:
+			return
+		default:
+			rd.processPriorityJobs()
+		}
+		time.Sleep(priorityReplicatePartSleepTime)
 	}
 }
 
@@ -733,14 +797,29 @@ func (rd *replicationDevice) processPriorityJobs() {
 					zap.String("jobType", jobType),
 					zap.String("From Device", pri.FromDevice.Device),
 					zap.String("To Device", strings.Join(toDevicesArr, ",")))
-				rjob := replJob{
-					partition: partition, nodes: pri.ToDevices,
-					headers: map[string]string{"X-Force-Acquire": "true"}}
-				if handoff || (policy.Type == "replication-nursery" &&
-					!common.LooksTrue(policy.Config["cache_hash_dirs"])) {
-					rd.i.replicateAll(rjob, handoff)
-				} else {
-					rd.i.replicateUsingHashes(rjob, &NoMoreNodes{})
+				if policy.Type == "replication" || policy.Type == "replication-nursery" {
+					// this is normal replication / nursery replication in nursery
+					rjob := replJob{
+						partition: partition, nodes: pri.ToDevices,
+						listFilesToReplicate: rd.listAllFilesToReplicate,
+						headers:              map[string]string{"X-Force-Acquire": "true"}}
+					if handoff || (policy.Type == "replication-nursery" &&
+						!common.LooksTrue(policy.Config["cache_hash_dirs"])) {
+						rd.i.replicateAll(rjob, handoff)
+					} else {
+						rd.i.replicateUsingHashes(rjob, &NoMoreNodes{})
+					}
+				}
+				if policy.Type == "replication-nursery" || policy.Type == "hec" {
+					// for stable replication
+					if nrd, ok := rd.r.nurseryDevices[rd.Key()]; ok {
+						rjob := replJob{
+							partition: partition, nodes: pri.ToDevices,
+							listFilesToReplicate: nrd.listAllFilesToReplicate,
+							headers:              map[string]string{"X-Force-Acquire": "true"}}
+						rd.i.replicateAll(rjob, handoff)
+						rd.updateStat("PartitionsDone", 1)
+					}
 				}
 			}()
 			rd.updateStat("PriorityRepsDone", 1)
@@ -752,11 +831,12 @@ func (rd *replicationDevice) processPriorityJobs() {
 
 var newReplicationDevice = func(dev *ring.Device, policy int, r *Replicator) *replicationDevice {
 	rd := &replicationDevice{
-		r:      r,
-		dev:    dev,
-		policy: policy,
-		cancel: make(chan struct{}),
-		priRep: make(chan PriorityRepJob),
+		r:         r,
+		dev:       dev,
+		policy:    policy,
+		cancel:    make(chan struct{}),
+		pricancel: make(chan struct{}),
+		priRep:    make(chan PriorityRepJob),
 	}
 	rd.i = rd
 	return rd
@@ -896,6 +976,7 @@ func (r *Replicator) verifyRunningDevices() {
 					Stats: map[string]int64{},
 				}
 				go r.runningDevices[key].ReplicateLoop()
+				go r.runningDevices[key].PriorityReplicateLoop()
 			}
 			if _, ok := r.updatingDevices[key]; !ok {
 				r.updatingDevices[key] = newUpdateDevice(dev, policy, r)
