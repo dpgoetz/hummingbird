@@ -572,7 +572,7 @@ func TestDiskUsage(t *testing.T) {
 	require.Nil(t, err)
 	defer cleanup()
 
-	server.diskInUse = common.NewKeyedLimit(2, 8)
+	server.diskInUse = common.NewKeyedLimit(2, 8, 0)
 	server.diskInUse.Acquire("sda", false)
 	rsp := test.MakeCaptureResponse()
 	req, err := http.NewRequest("GET", "/diskusage", nil)

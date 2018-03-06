@@ -344,26 +344,53 @@ func GetDefault(h http.Header, key string, dfl string) string {
 
 // More like a map of semaphores.  I don't know what to call it.
 type KeyedLimit struct {
-	limitPerKey int64
-	totalLimit  int64
-	lock        sync.Mutex
-	locked      map[string]bool
-	inUse       map[string]int64
-	totalUse    int64
+	limitPerKey    int64
+	totalLimit     int64
+	lock           sync.Mutex
+	locked         map[string]bool
+	inUse          map[string]int64
+	totalUse       int64
+	acquireTimeout time.Duration
+	acquireChan    chan bool
 }
 
+func (k *KeyedLimit) atLimit(v int64) bool {
+	return (k.limitPerKey > 0 && v >= k.limitPerKey) || (k.totalLimit > 0 && k.totalUse > k.totalLimit)
+}
+
+func (k *KeyedLimit) add(key string, v int64) {
+	k.inUse[key] += v
+	k.totalUse += v
+}
 func (k *KeyedLimit) Acquire(key string, force bool) int64 {
 	// returns 0 if Acquire is successful, otherwise the number of requests inUse by disk or -1 if disk is locked
 	k.lock.Lock()
 	if k.locked[key] {
 		k.lock.Unlock()
 		return -1
-	} else if v := k.inUse[key]; !force && ((k.limitPerKey > 0 && v >= k.limitPerKey) || (k.totalLimit > 0 && k.totalUse > k.totalLimit)) {
+	} else if v := k.inUse[key]; !force && k.atLimit(v) {
+		if k.acquireTimeout > 0 {
+			k.add(key, 1) // go ahead and get a spot
+			k.lock.Unlock()
+			// but dont use it til somebody else finishes
+			timer := time.NewTimer(k.acquireTimeout)
+			defer timer.Stop()
+			select {
+			case <-k.acquireChan:
+				// got one. it will Release later
+				return 0
+			case <-timer.C:
+				// too bad. give up spot
+				k.lock.Lock()
+				k.add(key, -1)
+				k.lock.Unlock()
+			}
+			return v
+		}
 		k.lock.Unlock()
 		return v
 	} else {
-		k.inUse[key] += 1
-		k.totalUse += 1
+		k.add(key, 1)
 		k.lock.Unlock()
 		return 0
 	}
@@ -371,8 +398,17 @@ func (k *KeyedLimit) Acquire(key string, force bool) int64 {
 
 func (k *KeyedLimit) Release(key string) {
 	k.lock.Lock()
-	k.inUse[key] -= 1
-	k.totalUse -= 1
+	if k.acquireTimeout > 0 {
+		if v := k.inUse[key]; k.atLimit(v) {
+			select {
+			// it is possible that reqs waiting timed out. just try to send to channel
+			// and return
+			case k.acquireChan <- true:
+			default:
+			}
+		}
+	}
+	k.add(key, -1)
 	k.lock.Unlock()
 }
 
@@ -407,8 +443,13 @@ func (k *KeyedLimit) MarshalJSON() ([]byte, error) {
 	return data, err
 }
 
-func NewKeyedLimit(limitPerKey int64, totalLimit int64) *KeyedLimit {
-	return &KeyedLimit{limitPerKey: limitPerKey, totalLimit: totalLimit, locked: make(map[string]bool), inUse: make(map[string]int64)}
+func NewKeyedLimit(limitPerKey int64, totalLimit int64, acquireTimeout time.Duration) *KeyedLimit {
+	return &KeyedLimit{limitPerKey: limitPerKey,
+		totalLimit:     totalLimit,
+		locked:         make(map[string]bool),
+		inUse:          make(map[string]int64),
+		acquireChan:    make(chan bool),
+		acquireTimeout: acquireTimeout}
 }
 
 func Map2Headers(m map[string]string) http.Header {

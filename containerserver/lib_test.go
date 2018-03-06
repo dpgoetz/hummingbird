@@ -81,7 +81,7 @@ func makeTestServer() (http.Handler, func(), error) {
 		checkMounts:      false,
 		updateClient:     http.DefaultClient,
 		containerEngine:  newLRUEngine(dir, "changeme", "changeme", 32),
-		diskInUse:        common.NewKeyedLimit(2, 2),
+		diskInUse:        common.NewKeyedLimit(2, 2, 0),
 		autoCreatePrefix: ".",
 	}
 	cleanup := func() {
@@ -107,7 +107,7 @@ func makeTestServer2() (*ContainerServer, http.Handler, func(), error) {
 		checkMounts:     false,
 		updateClient:    http.DefaultClient,
 		containerEngine: newLRUEngine(dir, "changeme", "changeme", 32),
-		diskInUse:       common.NewKeyedLimit(2, 2),
+		diskInUse:       common.NewKeyedLimit(2, 2, 0),
 	}
 	cleanup := func() {
 		os.RemoveAll(dir)

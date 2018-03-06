@@ -623,7 +623,8 @@ func NewServer(serverconf conf.Config, flags *flag.FlagSet, cnf srv.ConfigLoader
 		return ipPort, nil, nil, fmt.Errorf("Error setting up logger: %v", err)
 	}
 
-	server.diskInUse = common.NewKeyedLimit(serverconf.GetLimit("app:container-server", "disk_limit", 0, 0))
+	l1, l2 := serverconf.GetLimit("app:container-server", "disk_limit", 0, 0)
+	server.diskInUse = common.NewKeyedLimit(l1, l2, 0)
 	bindIP := serverconf.GetDefault("app:container-server", "bind_ip", "0.0.0.0")
 	bindPort := int(serverconf.GetInt("app:container-server", "bind_port", common.DefaultContainerServerPort))
 	certFile := serverconf.GetDefault("app:container-server", "cert_file", "")

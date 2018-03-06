@@ -218,6 +218,7 @@ func (server *ObjectServer) ObjGetHandler(writer http.ResponseWriter, request *h
 		}
 	}
 	writer.WriteHeader(http.StatusOK)
+	time.Sleep(2 * time.Second)
 	if request.Method == "GET" {
 		if server.checkEtags {
 			hash := md5.New()
@@ -650,8 +651,11 @@ func NewServer(serverconf conf.Config, flags *flag.FlagSet, cnf srv.ConfigLoader
 	server.reconCachePath = serverconf.GetDefault("app:object-server", "recon_cache_path", "/var/cache/swift")
 	server.checkMounts = serverconf.GetBool("app:object-server", "mount_check", true)
 	server.checkEtags = serverconf.GetBool("app:object-server", "check_etags", false)
-	server.diskInUse = common.NewKeyedLimit(serverconf.GetLimit("app:object-server", "disk_limit", 25, 0))
-	server.accountDiskInUse = common.NewKeyedLimit(serverconf.GetLimit("app:object-server", "account_rate_limit", 0, 0))
+	acquireTimeout := time.Duration(serverconf.GetFloat("app:object-server", "acquire_timeout", 0) * float64(time.Second))
+	l1, l2 := serverconf.GetLimit("app:object-server", "disk_limit", 25, 0)
+	server.diskInUse = common.NewKeyedLimit(l1, l2, acquireTimeout)
+	l1, l2 = serverconf.GetLimit("app:object-server", "account_rate_limit", 0, 0)
+	server.accountDiskInUse = common.NewKeyedLimit(l1, l2, acquireTimeout)
 	server.expiringDivisor = serverconf.GetInt("app:object-server", "expiring_objects_container_divisor", 86400)
 	bindIP := serverconf.GetDefault("app:object-server", "bind_ip", "0.0.0.0")
 	bindPort := int(serverconf.GetInt("app:object-server", "bind_port", common.DefaultObjectServerPort))
