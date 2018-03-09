@@ -333,6 +333,13 @@ func LogRequestLine(logger *zap.Logger, request *http.Request, start time.Time, 
 			zap.Float64("requestTimeSeconds", time.Since(start).Seconds()),
 			zap.Float64("requestTimeToHeaderSeconds", newWriter.ResponseStarted.Sub(start).Seconds()),
 			zap.String("extraInfo", extraInfo),
+			zap.String("t1", common.GetDefault(request.Header, "t1", "-")),
+			zap.String("t2", common.GetDefault(request.Header, "t2", "-")),
+			zap.String("t3", common.GetDefault(request.Header, "t3", "-")),
+			zap.String("t4", common.GetDefault(request.Header, "t4", "-")),
+			zap.String("t5", common.GetDefault(request.Header, "t5", "-")),
+			zap.String("t6", common.GetDefault(request.Header, "t6", "-")),
+			zap.String("t7", common.GetDefault(request.Header, "t7", "-")),
 		)
 	}
 }

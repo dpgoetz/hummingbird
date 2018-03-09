@@ -263,6 +263,7 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 		}
 	}
 
+	t := time.Now()
 	obj, err := server.newObject(request, vars, false)
 	if err != nil {
 		srv.GetLogger(request).Error("Error getting obj", zap.Error(err))
@@ -270,6 +271,8 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 		return
 	}
 	defer obj.Close()
+	t1 := time.Since(t)
+	t = time.Now()
 
 	if obj.Exists() {
 		if inm := request.Header.Get("If-None-Match"); inm == "*" {
@@ -290,6 +293,8 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 		}
 	}
 
+	t2 := time.Since(t)
+	t = time.Now()
 	tempFile, err := obj.SetData(request.ContentLength)
 	if err == DriveFullError {
 		srv.GetLogger(request).Debug("Not enough space available")
@@ -301,6 +306,8 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 		return
 	}
 
+	t3 := time.Since(t)
+	t = time.Now()
 	hash := md5.New()
 	totalSize, err := common.Copy(request.Body, tempFile, hash)
 	if err == io.ErrUnexpectedEOF {
@@ -311,6 +318,8 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 		srv.StandardResponse(writer, http.StatusInternalServerError)
 		return
 	}
+	t4 := time.Since(t)
+	t = time.Now()
 	metadata := map[string]string{
 		"name":           "/" + vars["account"] + "/" + vars["container"] + "/" + vars["obj"],
 		"X-Timestamp":    requestTimestamp,
@@ -332,12 +341,24 @@ func (server *ObjectServer) ObjPutHandler(writer http.ResponseWriter, request *h
 	}
 	outHeaders.Set("ETag", metadata["ETag"])
 
+	t5 := time.Since(t)
+	t = time.Now()
 	if err := obj.Commit(metadata); err != nil {
 		srv.GetLogger(request).Error("Error saving object", zap.Error(err))
 		srv.StandardResponse(writer, http.StatusInternalServerError)
 		return
 	}
+	t6 := time.Since(t)
+	t = time.Now()
 	server.containerUpdates(writer, request, metadata, request.Header.Get("X-Delete-At"), vars, srv.GetLogger(request))
+	t7 := time.Since(t)
+	request.Header.Set("t1", fmt.Sprintf("%.8f", float64(t1)/float64(time.Second)))
+	request.Header.Set("t2", fmt.Sprintf("%.8f", float64(t2)/float64(time.Second)))
+	request.Header.Set("t3", fmt.Sprintf("%.8f", float64(t3)/float64(time.Second)))
+	request.Header.Set("t4", fmt.Sprintf("%.8f", float64(t4)/float64(time.Second)))
+	request.Header.Set("t5", fmt.Sprintf("%.8f", float64(t5)/float64(time.Second)))
+	request.Header.Set("t6", fmt.Sprintf("%.8f", float64(t6)/float64(time.Second)))
+	request.Header.Set("t7", fmt.Sprintf("%.8f", float64(t7)/float64(time.Second)))
 	srv.StandardResponse(writer, http.StatusCreated)
 }
 
