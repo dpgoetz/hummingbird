@@ -191,6 +191,9 @@ func (ot *IndexDB) TempFile(hsh string, shard int, timestamp int64, sizeHint int
 	}
 	if item != nil && item.Timestamp >= timestamp {
 		if item.Timestamp > timestamp || !item.Nursery || nursery {
+			if err = ot.quickVerifyItem(item); err != nil {
+				return nil, err
+			}
 			return nil, nil
 		}
 	}
@@ -376,6 +379,19 @@ func (ot *IndexDB) Commit(f fs.AtomicFileWriter, hsh string, shard int, timestam
 		}
 	}
 	return err
+}
+
+func (ot *IndexDB) quickVerifyItem(item *IndexDBItem) error {
+
+	pth, err := ot.WholeObjectPath(item.Hash, item.Shard, item.Timestamp, item.Nursery)
+	if err != nil {
+		return err
+	}
+	ecfunc := realECAuditFuncs{}
+	if _, err = ecfunc.AuditEcObj(pth, item, 0); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (ot *IndexDB) SetStabilized(hsh string, shard int, timestamp int64, stabilizePath bool) error {
