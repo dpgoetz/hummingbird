@@ -556,6 +556,33 @@ func (o *ecObject) restabilize(dev *ring.Device) error {
 	return o.idb.SetStabilized(o.Hash, o.Shard, o.Timestamp, false)
 }
 
+func (o *ecObject) isAlreadyStable(nodes []*ring.Device) bool {
+	wg := sync.WaitGroup{}
+	var successes int64
+	for i, node := range nodes {
+		wg.Add(1)
+		go func(shard int) {
+			defer wg.Done()
+			url := fmt.Sprintf("%s://%s:%d/ec-shard/%s/%s/%d/%s", node.Scheme, node.ReplicationIp,
+				node.ReplicationPort, node.Device, o.Hash, i,
+				o.metadata["X-Timestamp"])
+			req, err := http.NewRequest("HEAD", url, nil)
+			if err == nil {
+				req.Header.Set("X-Trans-Id", o.txnId)
+				req.Header.Set("User-Agent", "nursery-stabilizer")
+				//TODO: add in suppress log thing here
+				if resp, err := o.client.Do(req); err == nil {
+					if resp.StatusCode/100 == 2 {
+						atomic.AddInt64(&successes, 1)
+					}
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	return successes == int64(len(nodes))
+}
+
 func (o *ecObject) Stabilize(dev *ring.Device) error {
 	if o.Restabilize {
 		return o.restabilize(dev)
@@ -567,6 +594,12 @@ func (o *ecObject) Stabilize(dev *ring.Device) error {
 	nodes := o.ring.GetNodes(partition)
 	if len(nodes) != o.dataShards+o.parityShards {
 		return fmt.Errorf("Ring doesn't match EC scheme (%d != %d).", len(nodes), o.dataShards+o.parityShards)
+	}
+	if !o.Deletion && o.isAlreadyStable(nodes) {
+		if o.idb != nil {
+			return o.idb.Remove(o.Hash, o.Shard, o.Timestamp, true)
+		}
+		return nil
 	}
 	wrs := make([]io.WriteCloser, len(nodes))
 	e := common.NewExpector(o.client)

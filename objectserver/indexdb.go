@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"path"
@@ -566,6 +567,11 @@ func (ot *IndexDB) ListObjectsToStabilize() ([]*IndexDBItem, error) {
 		}(); err != nil {
 			return listing, err
 		}
+	}
+	for i := len(listing) - 1; i > 0; i-- {
+		// shuffle objects so all stabilizers aren't all doing same objects
+		j := rand.Intn(i + 1)
+		listing[j], listing[i] = listing[i], listing[j]
 	}
 	return listing, nil
 }

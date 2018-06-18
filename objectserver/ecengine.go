@@ -137,6 +137,36 @@ func (f *ecEngine) GetReplicationDevice(oring ring.Ring, dev *ring.Device, r *Re
 	return GetNurseryDevice(oring, dev, f.policy, r, f)
 }
 
+func (f *ecEngine) ecShardHeadHandler(writer http.ResponseWriter, request *http.Request) {
+	vars := srv.GetVars(request)
+	idb, err := f.getDB(vars["device"])
+	if err != nil {
+		srv.StandardResponse(writer, http.StatusBadRequest)
+		return
+	}
+	shardIndex, err := strconv.Atoi(vars["index"])
+	if err != nil {
+		srv.StandardResponse(writer, http.StatusBadRequest)
+		return
+	}
+	item, err := idb.Lookup(vars["hash"], shardIndex, true)
+	if err != nil || item == nil || item.Deletion {
+		srv.StandardResponse(writer, http.StatusNotFound)
+		return
+	}
+	metadata := map[string]string{}
+	if err = json.Unmarshal(item.Metabytes, &metadata); err != nil {
+		srv.StandardResponse(writer, http.StatusBadRequest)
+		return
+	}
+	if metadata["X-Timestamp"] == "" || metadata["X-Timestamp"] != vars["timestamp"] {
+		srv.StandardResponse(writer, http.StatusNotFound)
+		return
+	}
+	srv.StandardResponse(writer, http.StatusOK)
+	return
+}
+
 func (f *ecEngine) ecShardGetHandler(writer http.ResponseWriter, request *http.Request) {
 	vars := srv.GetVars(request)
 	idb, err := f.getDB(vars["device"])
@@ -457,6 +487,7 @@ func (f *ecEngine) listPartitionHandler(writer http.ResponseWriter, request *htt
 
 func (f *ecEngine) RegisterHandlers(addRoute func(method, path string, handler http.HandlerFunc)) {
 	addRoute("PUT", "/ec-nursery/:device/:hash", f.ecNurseryPutHandler)
+	addRoute("HEAD", "/ec-shard/:device/:hash/:index/:timestamp", f.ecShardHeadHandler)
 	addRoute("GET", "/ec-shard/:device/:hash/:index", f.ecShardGetHandler)
 	addRoute("PUT", "/ec-shard/:device/:hash/:index", f.ecShardPutHandler)
 	addRoute("DELETE", "/ec-shard/:device/:hash/:index", f.ecShardDeleteHandler)
