@@ -106,7 +106,7 @@ func (oc *standardObjectClient) putObject(ctx context.Context, account, containe
 	devs, more := oc.objectRing.getWriteNodes(objectPartition)
 	objectReplicaCount := len(devs)
 
-	devToRequest := func(index int, dev *ring.Device) (*http.Request, error) {
+	devToRequest := func(index int, dev *ring.Device, force bool) (*http.Request, error) {
 		trp, wp := io.Pipe()
 		rp := &putReader{Reader: trp, cancel: cancel, w: wp, ready: ready}
 		url := fmt.Sprintf("%s://%s:%d/%s/%d/%s/%s/%s", dev.Scheme, dev.Ip, dev.Port, dev.Device, objectPartition,
@@ -125,14 +125,23 @@ func (oc *standardObjectClient) putObject(ctx context.Context, account, containe
 		req.Header.Set("X-Container-Partition", strconv.FormatUint(containerPartition, 10))
 		addUpdateHeaders("X-Container", req.Header, containerDevices, index, objectReplicaCount)
 		req.Header.Set("Expect", "100-continue")
+		if force {
+			req.Header.Set("X-Force-Acquire", "true")
+		}
 		return req, nil
 	}
 
 	for i := 0; i < objectReplicaCount; i++ {
 		go func(index int) {
 			var resp *http.Response
-			for dev := devs[index]; dev != nil; dev = more.Next() {
-				if req, err := devToRequest(index, dev); err != nil {
+			dev := devs[index]
+			erDevs := []*ring.Device{}
+			tryErs := false
+			for {
+				if dev == nil {
+					break
+				}
+				if req, err := devToRequest(index, dev, tryErs); err != nil {
 					oc.Logger.Error("unable create PUT request", zap.Error(err))
 					resp = nectarutil.ResponseStub(http.StatusInternalServerError, err.Error())
 				} else if r, err := oc.pdc.client.Do(req); err != nil {
@@ -143,11 +152,26 @@ func (oc *standardObjectClient) putObject(ctx context.Context, account, containe
 					if r.StatusCode >= 200 && r.StatusCode < 500 {
 						break
 					}
+					if r.StatusCode == 503 && !tryErs {
+						erDevs = append(erDevs, dev)
+					}
 				}
 				select {
 				case <-cancel:
 					return
 				default:
+				}
+				if !tryErs {
+					dev = more.Next()
+					if dev == nil {
+						tryErs = true
+					} else {
+						continue
+					}
+				}
+				if tryErs && len(erDevs) > 0 {
+					dev, erDevs = erDevs[0], erDevs[1:]
+					time.Sleep(50 * time.Millisecond)
 				}
 			}
 			if resp == nil {
